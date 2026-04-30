@@ -5,6 +5,7 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   test:
@@ -32,7 +33,7 @@ jobs:
         run: npm test
         env:
           NODE_ENV: test
-          JWT_SECRET: ci-test-secret-do-not-use-in-production
+          JWT_SECRET: "${{ secrets.JWT_SECRET }}"
           STORAGE_BACKEND: json
 
       - name: Check for vulnerabilities

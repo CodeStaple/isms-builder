@@ -40,8 +40,7 @@ USER isms
 ENV NODE_ENV=production \
     PORT=3000 \
     JWT_EXPIRES_IN=8h \
-    DEV_HEADER_AUTH=false \
-    STORAGE_BACKEND=json
+    DEV_HEADER_AUTH=false
 
 EXPOSE 3000
 
