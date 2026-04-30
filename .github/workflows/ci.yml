@@ -33,7 +33,7 @@ jobs:
         run: npm test
         env:
           NODE_ENV: test
-          JWT_SECRET: [REDACTED:kv_secret:da1a46a7]
+          JWT_SECRET: "${{ secrets.JWT_SECRET }}"
           STORAGE_BACKEND: json
 
       - name: Check for vulnerabilities
