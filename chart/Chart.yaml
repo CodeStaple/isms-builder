@@ -1,0 +1,17 @@
+apiVersion: v2
+name: isms-builder
+description: ISMS Template Builder - Build Mode
+type: application
+version: 0.1.0
+appVersion: "1.28.0"
+home: https://github.com/CodeStaple/isms-builder
+sources:
+  - https://github.com/CodeStaple/isms-builder
+maintainers:
+  - name: CodeStaple
+    url: https://github.com/CodeStaple
+keywords:
+  - isms
+  - security
+  - compliance
+  - iso27001
