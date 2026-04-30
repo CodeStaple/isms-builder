@@ -74,13 +74,21 @@ tolerations: []
 
 affinity: {}
 
-# Environment variables
+# Environment variables (non-sensitive)
 env:
   NODE_ENV: production
   PORT: "3000"
   JWT_EXPIRES_IN: "8h"
   DEV_HEADER_AUTH: "false"
   STORAGE_BACKEND: "json"
+
+# Sensitive environment variables sourced from Kubernetes Secrets
+# Create the secret first:
+#   kubectl create secret generic isms-builder-secrets [REDACTED:high_entropy:759cd97e]
+secretEnv:
+  JWT_SECRET:
+    secretName: isms-builder-secrets
+    secretKey: jwt-secret
 
 # Health check configuration
 healthCheck:
