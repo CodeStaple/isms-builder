@@ -1,33 +1,36 @@
-# FILE: .github/workflows/ci.yml
-name: Build and Publish
+name: CI/CD
 
 on:
   push:
-    branches:
-      - main
-      - develop
+    branches: [main, develop]
   pull_request:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
   packages: write
   actions: read
 
-jobs:
-  test:
-    name: Test (Node.js ${{ matrix.node-version }})
-    runs-on: ubuntu-latest
+env:
+  REGISTRY: ghcr.io
 
+jobs:
+  # ── Unit & integration tests ─────────────────────────────
+  test:
+    name: Test (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         node-version: [20.x, 22.x]
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Setup Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v4
@@ -35,8 +38,7 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: npm
 
-      - name: Install dependencies
-        run: npm ci
+      - run: npm ci
 
       - name: Run tests
         run: npm test
@@ -45,78 +47,94 @@ jobs:
           JWT_SECRET: ci-test-demo-secret
           STORAGE_BACKEND: json
 
-      - name: Check for vulnerabilities
+      - name: Audit dependencies
         run: npm audit --audit-level=high
         continue-on-error: true
 
-  build-and-push:
-    name: Build & Push
+  # ── Static security analysis (runs parallel to tests) ───
+  scan:
+    name: Security Scan
     runs-on: ubuntu-latest
-    needs: test
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set repository name lowercase
-        id: repo
-        run: echo "name=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
-
-      - name: Run Semgrep security scan
+      - name: Semgrep SAST
         run: |
           pip install semgrep
-          semgrep scan --config "p/default" --config "p/javascript" --config "p/docker" --config "p/github-actions" --json --output semgrep-results.json || true
+          semgrep scan \
+            --config "p/default" \
+            --config "p/javascript" \
+            --config "p/docker" \
+            --config "p/github-actions" \
+            --json --output semgrep-results.json || true
         continue-on-error: true
 
-      - name: Upload Semgrep scan results
+      - name: Upload Semgrep results
         uses: actions/upload-artifact@v4
+        if: always() && hashFiles('semgrep-results.json') != ''
         with:
           name: ankra-semgrep-scan
           path: semgrep-results.json
           retention-days: 90
-        if: always() && hashFiles('semgrep-results.json') != ''
 
-      - name: Run Checkov IaC security scan
+      - name: Checkov IaC scan
         uses: bridgecrewio/checkov-action@v12
         with:
           directory: .
+          framework: dockerfile,helm,github_actions
           output_format: json
           output_file_path: checkov-results.json
           soft_fail: true
-          framework: dockerfile,helm,github_actions
         continue-on-error: true
 
-      - name: Upload Checkov scan results
+      - name: Upload Checkov results
         uses: actions/upload-artifact@v4
+        if: always() && hashFiles('checkov-results.json') != ''
         with:
           name: ankra-checkov-scan
           path: checkov-results.json
           retention-days: 90
-        if: always() && hashFiles('checkov-results.json') != ''
 
+  # ── Docker build + Helm package (main branch only) ──────
+  build:
+    name: Build & Publish
+    runs-on: ubuntu-latest
+    needs: [test, scan]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive image name (lowercase)
+        id: repo
+        run: |
+          echo "image=${{ env.REGISTRY }}/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+          echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+
+      # ── Docker ───────────────────────────────────────────
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@v3
 
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v4
+      - name: Login to GHCR
+        uses: docker/login-action@v3
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata
+      - name: Docker metadata
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ steps.repo.outputs.name }}
+          images: ${{ steps.repo.outputs.image }}
           tags: |
             type=sha
             type=ref,event=branch
             type=semver,pattern={{version}}
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build and push Docker image
+      - name: Build and push image
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -125,54 +143,41 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          platforms: linux/amd64
 
+      # ── Image vulnerability scan ────────────────────────
       - name: Get short SHA
         id: vars
         run: echo "short_sha=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
 
-      - name: Run Trivy vulnerability scanner
+      - name: Trivy vulnerability scan
         uses: aquasecurity/trivy-action@v0.35.0
         with:
-          image-ref: ghcr.io/${{ steps.repo.outputs.name }}:sha-${{ steps.vars.outputs.short_sha }}
+          image-ref: ${{ steps.repo.outputs.image }}:sha-${{ steps.vars.outputs.short_sha }}
           format: json
           output: trivy-results.json
           severity: CRITICAL,HIGH,MEDIUM,LOW
           trivyignores: .trivyignore
         continue-on-error: true
 
-      - name: Upload Trivy scan results
+      - name: Upload Trivy results
         uses: actions/upload-artifact@v4
+        if: always() && hashFiles('trivy-results.json') != ''
         with:
           name: ankra-security-scan
           path: trivy-results.json
           retention-days: 90
-        if: always() && hashFiles('trivy-results.json') != ''
 
-      - name: Install Helm
+      # ── Helm ─────────────────────────────────────────────
+      - name: Setup Helm
         uses: azure/setup-helm@v4
-        with:
-          version: '3.14.0'
 
       - name: Helm lint
         run: helm lint chart/ --strict
 
       - name: Package and push Helm chart
         run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
           helm package chart/
-          CHART_VERSION=$(grep '^version:' chart/Chart.yaml | awk '{print $2}')
-          helm push isms-builder-${CHART_VERSION}.tgz oci://ghcr.io/${{ steps.repo.outputs.name }}
-
-      - name: Make packages public
-        run: |
-          curl -X PATCH \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            https://api.github.com/user/packages/container/isms-builder/versions \
-            -d '{"visibility":"public"}' || true
-          
-          curl -X PATCH \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            https://api.github.com/user/packages/container/isms-builder%2Fisms-builder/versions \
-            -d '{"visibility":"public"}' || true
+          CHART_PKG=$(ls isms-builder-*.tgz)
+          helm push "$CHART_PKG" oci://${{ env.REGISTRY }}/${{ steps.repo.outputs.owner }}
