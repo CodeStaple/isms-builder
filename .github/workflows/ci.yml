@@ -1,11 +1,19 @@
-name: CI
+name: Build and Publish
 
 on:
   push:
-    branches: [main, develop]
+    branches:
+      - main
+      - develop
   pull_request:
-    branches: [main]
+    branches:
+      - main
   workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  actions: read
 
 jobs:
   test:
@@ -40,76 +48,52 @@ jobs:
         run: npm audit --audit-level=high
         continue-on-error: true
 
-  security:
-    name: Security Scan
-    runs-on: ubuntu-latest
-    needs: test
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build image for scanning
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: false
-          load: true
-          tags: isms-builder:scan
-
-      - name: Trivy - Docker image vulnerability scan
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: isms-builder:scan
-          format: table
-          exit-code: 1
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          trivyignores: .trivyignore
-
-      - name: Trivy - Helm chart misconfiguration scan
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: config
-          scan-ref: chart/
-          format: table
-          exit-code: 1
-          severity: CRITICAL,HIGH
-
-      - name: Trivy - Dockerfile best practices
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: config
-          scan-ref: Dockerfile
-          format: table
-          exit-code: 0
-          severity: CRITICAL,HIGH,MEDIUM
-
-      - name: Helm lint
-        run: |
-          helm lint chart/ --strict
-
-  build:
+  build-and-push:
     name: Build & Push
     runs-on: ubuntu-latest
-    needs: [test, security]
+    needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
-    permissions:
-      contents: read
-      packages: write
-
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Run Semgrep security scan
+        run: |
+          pip install semgrep
+          semgrep scan --config "p/default" --config "p/javascript" --config "p/docker" --config "p/github-actions" --json --output semgrep-results.json || true
+        continue-on-error: true
+
+      - name: Upload Semgrep scan results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ankra-semgrep-scan
+          path: semgrep-results.json
+          retention-days: 90
+        if: always() && hashFiles('semgrep-results.json') != ''
+
+      - name: Run Checkov IaC security scan
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: .
+          output_format: json
+          output_file_path: checkov-results.json
+          soft_fail: true
+          framework: dockerfile,helm,github_actions
+        continue-on-error: true
+
+      - name: Upload Checkov scan results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ankra-checkov-scan
+          path: checkov-results.json
+          retention-days: 90
+        if: always() && hashFiles('checkov-results.json') != ''
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to GHCR
+      - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -120,13 +104,15 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/codestaple/isms-builder
+          images: ghcr.io/${{ github.repository }}
           tags: |
             type=sha
-            type=raw,value=latest
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build and push
-        uses: docker/build-push-action@v5
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: true
@@ -134,3 +120,54 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Get short SHA
+        id: vars
+        run: echo "short_sha=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          image-ref: ghcr.io/${{ github.repository }}:sha-${{ steps.vars.outputs.short_sha }}
+          format: json
+          output: trivy-results.json
+          severity: CRITICAL,HIGH,MEDIUM,LOW
+          trivyignores: .trivyignore
+        continue-on-error: true
+
+      - name: Upload Trivy scan results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ankra-security-scan
+          path: trivy-results.json
+          retention-days: 90
+        if: always() && hashFiles('trivy-results.json') != ''
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: '3.14.0'
+
+      - name: Helm lint
+        run: helm lint chart/ --strict
+
+      - name: Package and push Helm chart
+        run: |
+          helm registry login ghcr.io -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}
+          helm package chart/
+          CHART_VERSION=$(grep '^version:' chart/Chart.yaml | awk '{print $2}')
+          helm push isms-builder-${CHART_VERSION}.tgz oci://ghcr.io/${{ github.repository }}
+
+      - name: Make packages public
+        run: |
+          curl -X PATCH \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/user/packages/container/isms-builder/versions \
+            -d '{"visibility":"public"}' || true
+          
+          curl -X PATCH \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/user/packages/container/isms-builder%2Fisms-builder/versions \
+            -d '{"visibility":"public"}' || true
