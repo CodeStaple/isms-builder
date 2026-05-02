@@ -180,4 +180,36 @@ jobs:
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
           helm package chart/
           CHART_PKG=$(ls isms-builder-*.tgz)
-          helm push "$CHART_PKG" oci://${{ env.REGISTRY }}/${{ steps.repo.outputs.owner }}
+          helm push "$CHART_PKG" oci://${{ env.REGISTRY }}/${{ steps.repo.outputs.owner }}/charts
+
+      # ── Make packages public ─────────────────────────────
+      # GHCR packages are private by default. Attempt to set public visibility.
+      # If GITHUB_TOKEN lacks permission, set visibility manually in GitHub:
+      #   Profile → Packages → select package → Package settings → Change visibility
+      - name: Make container image public
+        run: |
+          curl -s -f -X PATCH \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/orgs/${{ steps.repo.outputs.owner }}/packages/container/isms-builder/visibility" \
+            -d '{"visibility":"public"}' || \
+          curl -s -f -X PATCH \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/user/packages/container/isms-builder/visibility" \
+            -d '{"visibility":"public"}' || true
+        continue-on-error: true
+
+      - name: Make Helm chart public
+        run: |
+          curl -s -f -X PATCH \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/orgs/${{ steps.repo.outputs.owner }}/packages/container/charts%2Fisms-builder/visibility" \
+            -d '{"visibility":"public"}' || \
+          curl -s -f -X PATCH \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/user/packages/container/charts%2Fisms-builder/visibility" \
+            -d '{"visibility":"public"}' || true
+        continue-on-error: true
