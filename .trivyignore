@@ -1,0 +1,9 @@
+# Base image system npm vulnerabilities (node:lts-alpine)
+# These are in /usr/local/lib/node_modules/npm/ — NOT app dependencies.
+# Safe to ignore until the base image is updated.
+
+# path-to-regexp: ReDoS via malformed URL parameters (system npm)
+CVE-2026-4867
+
+# picomatch: ReDoS via crafted extglob patterns (system npm)
+CVE-2026-33671

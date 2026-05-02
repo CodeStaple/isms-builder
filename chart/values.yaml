@@ -28,7 +28,7 @@ securityContext:
   capabilities:
     drop:
     - ALL
-  readOnlyRootFilesystem: false
+  readOnlyRootFilesystem: true
   runAsNonRoot: true
   runAsUser: 1000
 
@@ -84,7 +84,7 @@ env:
 
 # Sensitive environment variables sourced from Kubernetes Secrets
 # Create the secret first:
-#   kubectl create secret generic isms-builder-secrets [REDACTED:high_entropy:759cd97e]
+#   kubectl create secret generic isms-builder-secrets --from-literal=jwt-secret=YOUR_SECRET_HERE
 secretEnv:
   JWT_SECRET:
     secretName: isms-builder-secrets
