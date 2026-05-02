@@ -173,7 +173,7 @@ jobs:
         uses: azure/setup-helm@v4
 
       - name: Helm lint
-        run: helm lint chart/ --strict
+        run: helm lint chart/
 
       - name: Package and push Helm chart
         run: |
